@@ -1,0 +1,65 @@
+name: 🧪 Build Advanced Native Godot 4.7 iOS Editor
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-godot-native-ios:
+    runs-on: macos-15
+    steps:
+      - name: Checkout Godot Source Code
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot
+          ref: 'master' # (Assuming targeting the latest bleeding-edge/4.7 branch)
+          path: godot-source
+
+      - name: Setup Python, SCons & Native Dependencies
+        run: |
+          python3 -m pip install scons --break-system-packages
+          # Godot 4-এর নেটিভ রেন্ডারিংয়ের জন্য Vulkan/MoltenVK প্রয়োজন
+          brew install vulkan-headers vulkan-loader molten-vk
+
+      - name: Compile Godot Native iOS Editor (C++/Metal)
+        run: |
+          cd godot-source
+          # WebKit সম্পূর্ণ বাদ দিয়ে সরাসরি iOS এর জন্য নেটিভ কম্পাইল করা হচ্ছে।
+          # target=editor এবং platform=ios দিয়ে সরাসরি আইফোনের হার্ডওয়্যার অ্যাক্সেস নিশ্চিত করা হয়েছে।
+          scons platform=ios target=editor arch=arm64 ios_simulator=no vulkan=yes lto=auto optimize=speed -j$(sysctl -n hw.ncpu)
+
+      - name: Generate Native Xcode App Build
+        run: |
+          cd godot-source/platform/ios/export
+          
+          # কম্পাইল করা নেটিভ .a লাইব্রেরিটি Xcode প্রজেক্টের জন্য প্রস্তুত করা
+          mkdir -p bin
+          cp ../../../bin/libgodot.ios.editor.arm64.a bin/
+          
+          # সুইফটের র‍্যাপার বাদ দিয়ে Godot-এর নিজস্ব Objective-C++ অ্যাপ ডেলিগেট ব্যবহার করে বিল্ড
+          xcodebuild archive -project Godot_v4.xcodeproj \
+            -scheme Godot \
+            -configuration Release \
+            -arch arm64 \
+            -archivePath GodotEditor.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package Native IPA for Sideloading
+        run: |
+          cd godot-source/platform/ios/export
+          
+          # IPA প্যাকেজিং স্ট্রাকচার তৈরি
+          mkdir -p Payload
+          mv GodotEditor.xcarchive/Products/Applications/Godot.app Payload/
+          
+          # থার্ড-পার্টি ইনস্টলেশনের জন্য বেসিক এনটাইটেলমেন্ট ফিক্স (যাতে ক্র্যাশ না করে)
+          ldid -S Payload/Godot.app/Godot || true
+          
+          zip -r Godot4.7_Native_Editor.ipa Payload/
+
+      - name: Upload Native Editor IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-4.7-native-ios-ipa
+          path: godot-source/platform/ios/export/Godot4.7_Native_Editor.ipa
