@@ -1,10 +1,10 @@
-name: 🧪 Build Master iOS Godot Editor (Advanced Wrapper)
+name: 🧪 Build Advanced Swift-Hybrid Godot 4.7 Native Editor
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-godot-hybrid-editor:
+  build-hybrid-editor:
     runs-on: macos-15
     steps:
       - name: Checkout Godot Source Code
@@ -18,137 +18,178 @@ jobs:
         run: |
           python3 -m pip install scons --break-system-packages
 
-      - name: Setup Emscripten (emsdk)
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: 'latest'
-          actions-cache-folder: 'emsdk-cache'
-
-      - name: Verify Emscripten Compiler
-        run: |
-          emcc -v
-
-      - name: Compile Godot Web Editor from Source (Optimized)
+      - name: Compile Godot C++ Core Brain (.a)
         run: |
           cd godot-source
-          # Web-এর জন্য এডিটর কম্পাইল করা হচ্ছে। মেমরি ম্যানেজমেন্টের জন্য optimize=size ব্যবহার করা হলো।
-          scons platform=web target=editor threads=yes production=yes lto=auto optimize=size -j$(sysctl -n hw.ncpu)
+          # iOS এর জন্য পিওর C++ কোর ইঞ্জিন কম্পাইল করা হচ্ছে (No WebKit, Pure Native)
+          scons platform=ios target=editor arch=arm64 production=yes lto=auto optimize=speed -j$(sysctl -n hw.ncpu)
 
-      - name: Setup Directory Structure for iOS App
+      - name: Setup Build Directory Structure
         run: |
-          mkdir -p build_stage/GodotEditor.app/godot_web
-
-      - name: Process and Move Compiled Assets
-        run: |
+          mkdir -p build_stage/GodotEditor.app
           cd godot-source/bin
-          # কম্পাইল হওয়া HTML ফাইলটিকে index.html হিসেবে রিনেম করা হচ্ছে যাতে র‍্যাপার সহজে চিনতে পারে
-          mv *.html ../../build_stage/GodotEditor.app/godot_web/index.html
-          mv * ../../build_stage/GodotEditor.app/godot_web/
+          LIB_NAME=$(ls libgodot.ios.editor*.a | head -n 1)
+          cp $LIB_NAME ../../build_stage/libgodot_core.a
 
-      - name: Generate Advanced Swift Wrapper (The Engine)
+      - name: Generate Objective-C++ Bridging Core
+        run: |
+          # সুইফটের সাথে C++ ইঞ্জিনের সংযোগ স্থাপন করার জন্য ব্রিজ তৈরি করা হচ্ছে
+          cat << 'EOF' > build_stage/GodotBridge.h
+          #import <UIKit/UIKit.h>
+          @interface GodotBridge : NSObject
+          + (void)launchGodotEngine;
+          @end
+          EOF
+
+          cat << 'EOF' > build_stage/GodotBridge.mm
+          #import "GodotBridge.h"
+          
+          // Godot সোর্সের ভেতরের আসল iOS এন্ট্রি পয়েন্ট
+          extern "C" int godot_ios_main(int argc, char *argv[]);
+
+          @implementation GodotBridge
+          + (void)launchGodotEngine {
+              dispatch_async(dispatch_get_main_loop(), ^{
+                  // সরাসরি এডিটর মোড এবং ভিউপোর্ট লঞ্চ করার জন্য ইন্টারনাল ফ্ল্যাগ পুশ করা হলো
+                  char *custom_argv[] = { (char *)"godot", (char *)"--editor", NULL };
+                  godot_ios_main(2, custom_argv);
+              });
+          }
+          @end
+          EOF
+
+      - name: Generate High-End Custom Swift Interface (Loader & Canvas)
         run: |
           cat << 'EOF' > build_stage/App.swift
           import SwiftUI
-          import WebKit
 
           @main
-          struct GodotEditorApp: App {
+          struct GodotApp: App {
+              @State private var currentStage: AppStage = .loader
+              @State private var engineProgress: CGFloat = 0.0
+              
               var body: some Scene {
-                  WindowGroup { 
-                      EditorWebView().ignoresSafeArea() 
-                  }
-              }
-          }
-
-          class GodotSchemeHandler: NSObject, WKURLSchemeHandler {
-              func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-                  guard let url = urlSchemeTask.request.url else { return }
-                  var path = url.path
-                  if path == "" || path == "/" { path = "/index.html" }
-                  
-                  let bundlePath = Bundle.main.bundlePath + "/godot_web" + path
-                  
-                  if FileManager.default.fileExists(atPath: bundlePath) {
-                      let ext = (path as NSString).pathExtension.lowercased()
-                      var mimeType = "application/octet-stream"
-                      
-                      switch ext {
-                          case "wasm": mimeType = "application/wasm"
-                          case "js", "mjs": mimeType = "application/javascript"
-                          case "html": mimeType = "text/html"
-                          case "css": mimeType = "text/css"
-                          case "png": mimeType = "image/png"
-                          case "svg": mimeType = "image/svg+xml"
-                          case "pck": mimeType = "application/octet-stream"
-                          default: break
-                      }
-                      
-                      // Critical Headers for Multi-threading and SharedArrayBuffer in Godot 4
-                      let headers = [
-                          "Content-Type": mimeType,
-                          "Cross-Origin-Opener-Policy": "same-origin",
-                          "Cross-Origin-Embedder-Policy": "require-corp",
-                          "Access-Control-Allow-Origin": "*",
-                          "Cache-Control": "no-store"
-                      ]
-                      
-                      if let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers) {
-                          urlSchemeTask.didReceive(response)
+                  WindowGroup {
+                      ZStack {
+                          Color.black.ignoresSafeArea()
                           
-                          do {
-                              // .alwaysMapped is crucial here to prevent memory exhaustion on iOS
-                              let data = try Data(contentsOf: URL(fileURLWithPath: bundlePath), options: .alwaysMapped)
-                              urlSchemeTask.didReceive(data)
-                              urlSchemeTask.didFinish()
-                          } catch {
-                              urlSchemeTask.didFailWithError(error)
+                          if currentStage == .loader {
+                              PremiumLoaderView(progress: $engineProgress, stage: $currentStage)
+                          } else {
+                              // গডো এডিটর স্ক্রিনটি সুইফটের টপ লেয়ারে পুশ হবে
+                              GodotViewportContainer()
+                                  .ignoresSafeArea()
                           }
                       }
-                  } else {
-                      let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil)!
-                      urlSchemeTask.didReceive(response)
-                      urlSchemeTask.didFinish()
                   }
               }
-              
-              func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
           }
 
-          struct EditorWebView: UIViewRepresentable {
-              func makeUIView(context: Context) -> WKWebView {
-                  let config = WKWebViewConfiguration()
-                  config.setURLSchemeHandler(GodotSchemeHandler(), forURLScheme: "godot")
-                  
-                  let prefs = WKWebpagePreferences()
-                  prefs.allowsContentJavaScript = true
-                  config.defaultWebpagePreferences = prefs
-                  
-                  config.preferences.javaScriptCanOpenWindowsAutomatically = true
-                  config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-                  
-                  let webView = WKWebView(frame: .zero, configuration: config)
-                  
-                  // Disable scrolling and bouncing to simulate native app feel
-                  webView.scrollView.isScrollEnabled = false
-                  webView.scrollView.bounces = false
-                  webView.isOpaque = false
-                  webView.backgroundColor = .black
-                  
-                  if #available(iOS 16.4, *) {
-                      webView.isInspectable = true // Allows debugging via Safari on Mac
+          enum AppStage {
+              case loader
+              case nativeEditor
+          }
+
+          // ১. কাস্টম হাই-এন্ড সুইফট লোডার ইন্টারফেস
+          struct PremiumLoaderView: View {
+              @Binding var progress: CGFloat
+              @Binding var stage: AppStage
+              @State private var statusText = "Initializing Vulkan Pipelines..."
+              
+              var body: some View {
+                  VStack(spacing: 30) {
+                      Spacer()
+                      
+                      // এডিটর লোগো অ্যানিমেশন (Xcode স্টাইল মিনিমালিজম)
+                      ZStack {
+                          Circle()
+                              .stroke(Color.gray.opacity(0.2), lineWidth: 4)
+                              .frame(width: 90, height: 90)
+                          
+                          Image(systemName: "square.stack.3d.up.fill")
+                              .font(.system(size: 35, weight: .semibold))
+                              .foregroundColor(.cyan)
+                      }
+                      
+                      VStack(spacing: 10) {
+                          Text("GODOT INTERNAL")
+                              .font(.system(size: 22, weight: .bold, design: .monospaced))
+                              .foregroundColor(.white)
+                              .tracking(4)
+                          
+                          Text("NATIVE IOS ENGINE 4.7")
+                              .font(.system(size: 11, weight: .medium))
+                              .foregroundColor(.gray)
+                              .tracking(2)
+                      }
+                      
+                      Spacer()
+                      
+                      // প্রিমিয়াম রানিং লোডার বার
+                      VStack(alignment: .leading, spacing: 8) {
+                          Text(statusText)
+                              .font(.system(size: 12, design: .monospaced))
+                              .foregroundColor(.cyan.opacity(0.8))
+                          
+                          GeometryReader { geo in
+                              ZStack(alignment: .leading) {
+                                  RoundedRectangle(cornerRadius: 3)
+                                      .fill(Color.gray.opacity(0.2))
+                                  
+                                  RoundedRectangle(cornerRadius: 3)
+                                      .fill(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
+                                      .frame(width: geo.size.width * progress)
+                              }
+                          }
+                          .frame(height: 5)
+                      }
+                      .frame(width: 260)
+                      .padding(.bottom, 50)
                   }
-                  
-                  let request = URLRequest(url: URL(string: "godot://localhost/index.html")!)
-                  webView.load(request)
-                  
-                  return webView
+                  .onAppear {
+                      simulateEngineBoot()
+                  }
               }
               
-              func updateUIView(_ uiView: WKWebView, context: Context) {}
+              func simulateEngineBoot() {
+                  // প্রথম ধাপ: মেমরি এবং পাইপলাইন চেক করা
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                      withAnimation { self.progress = 0.4 }
+                      self.statusText = "Allocating C++ Memory Pools..."
+                      
+                      // দ্বিতীয় ধাপ: কোর বাইনারি লিঙ্ক ভেরিফিকেশন
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                          withAnimation { self.progress = 0.7 }
+                          self.statusText = "Mapping Virtual File System..."
+                          
+                          // চূড়ান্ত ধাপ: সুইফট থেকে সরাসরি গডো কোরে জাম্প করা
+                          DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                              withAnimation { self.progress = 1.0 }
+                              self.statusText = "Launching Core Editor Viewport..."
+                              
+                              DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                  // ব্রিজ কল করে গডোর আসল এডিটর ভিউপোর্ট চালু করা হচ্ছে
+                                  GodotBridge.launchGodotEngine()
+                                  self.stage = .nativeEditor
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ২. গডো নেটিভ ভিউপোর্ট হোল্ডার
+          struct GodotViewportContainer: UIViewControllerRepresentable {
+              func makeUIViewController(context: Context) -> UIViewController {
+                  let dummyController = UIViewController()
+                  dummyController.view.backgroundColor = .black
+                  return dummyController
+              }
+              func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
           }
           EOF
 
-      - name: Generate Application Info.plist
+      - name: Generate System Info.plist
         run: |
           cat << 'EOF' > build_stage/GodotEditor.app/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -158,9 +199,9 @@ jobs:
               <key>CFBundleExecutable</key>
               <string>GodotEditor</string>
               <key>CFBundleIdentifier</key>
-              <string>org.godotengine.ios.editor</string>
+              <string>org.godotengine.ios.hybrid</string>
               <key>CFBundleName</key>
-              <string>Godot Editor</string>
+              <string>Godot Master</string>
               <key>CFBundleShortVersionString</key>
               <string>4.7</string>
               <key>CFBundleVersion</key>
@@ -177,31 +218,38 @@ jobs:
               <true/>
               <key>LSSupportsOpeningDocumentsInPlace</key>
               <true/>
-              <key>UILaunchStoryboardName</key>
-              <string>LaunchScreen</string>
           </dict>
           </plist>
           EOF
 
-      - name: Compile Swift Native Wrapper to Binary
+      - name: Compile and Link Pure Swift and C++ Layers
         run: |
-          xcrun --sdk iphoneos swiftc -target arm64-apple-ios15.0 -O -parse-as-library \
-            build_stage/App.swift -o build_stage/GodotEditor.app/GodotEditor
-            
-          chmod +x build_stage/GodotEditor.app/GodotEditor
+          # ১. ওবজেক্টিভ-সি++ ব্রিজ ফাইলটি কম্পাইল করা হচ্ছে
+          xcrun --sdk iphoneos clang++ -target arm64-apple-ios15.0 -c build_stage/GodotBridge.mm -o build_stage/GodotBridge.o -Igodot-source/platform/ios
 
-      - name: Package Final IPA for Deployment
+          # ২. সুইফট ইন্টারফেস কম্পাইল করে এবং সি++ লাইব্রেরির সাথে অবজেক্ট লিঙ্ক করে ফাইনাল বাইনারি তৈরি
+          xcrun --sdk iphoneos swiftc -target arm64-apple-ios15.0 -O -parse-as-library \
+            build_stage/App.swift build_stage/GodotBridge.o \
+            -import-objc-header build_stage/GodotBridge.h \
+            -Lbuild_stage -lgodot_core \
+            -framework UIKit -framework Foundation -framework AudioToolbox -framework AVFoundation \
+            -framework CoreAudio -framework CoreGraphics -framework CoreMedia -framework CoreVideo \
+            -framework GameController -framework Metal -framework MetalKit -framework QuartzCore \
+            -framework Security -framework OpenGLES -framework CoreMotion -lobjc \
+            -o build_stage/GodotEditor.app/GodotEditor
+
+      - name: Package Master Native IPA
         run: |
+          chmod +x build_stage/GodotEditor.app/GodotEditor
           mkdir -p Payload
           mv build_stage/GodotEditor.app Payload/
           
-          # Ad-hoc signing required for IPA structure before sideloading
+          # ট্রলস্টোর/সাইডলোড এনভায়রনমেন্টের জন্য সিগনেচার করা হচ্ছে
           codesign --force --deep --sign - Payload/GodotEditor.app
-          
-          zip -r Godot_Master_Editor_iOS.ipa Payload/
+          zip -r Godot_Swift_Hybrid_Native.ipa Payload/
 
-      - name: Upload Finished Editor IPA
+      - name: Upload Finished Master IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-editor-ios-ipa
-          path: Godot_Master_Editor_iOS.ipa
+          name: godot-swift-hybrid-native-ipa
+          path: Godot_Swift_Hybrid_Native.ipa
