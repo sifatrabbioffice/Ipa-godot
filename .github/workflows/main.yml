@@ -1,65 +1,207 @@
-name: 🧪 Build Advanced Native Godot 4.7 iOS Editor
+name: 🧪 Build Master iOS Godot Editor (Advanced Wrapper)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-godot-native-ios:
+  build-godot-hybrid-editor:
     runs-on: macos-15
     steps:
       - name: Checkout Godot Source Code
         uses: actions/checkout@v4
         with:
           repository: godotengine/godot
-          ref: 'master' # (Assuming targeting the latest bleeding-edge/4.7 branch)
+          ref: 'master'
           path: godot-source
 
-      - name: Setup Python, SCons & Native Dependencies
+      - name: Setup Python and SCons
         run: |
           python3 -m pip install scons --break-system-packages
-          # Godot 4-এর নেটিভ রেন্ডারিংয়ের জন্য Vulkan/MoltenVK প্রয়োজন
-          brew install vulkan-headers vulkan-loader molten-vk
 
-      - name: Compile Godot Native iOS Editor (C++/Metal)
+      - name: Setup Emscripten (emsdk)
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 'latest'
+          actions-cache-folder: 'emsdk-cache'
+
+      - name: Verify Emscripten Compiler
+        run: |
+          emcc -v
+
+      - name: Compile Godot Web Editor from Source (Optimized)
         run: |
           cd godot-source
-          # WebKit সম্পূর্ণ বাদ দিয়ে সরাসরি iOS এর জন্য নেটিভ কম্পাইল করা হচ্ছে।
-          # target=editor এবং platform=ios দিয়ে সরাসরি আইফোনের হার্ডওয়্যার অ্যাক্সেস নিশ্চিত করা হয়েছে।
-          scons platform=ios target=editor arch=arm64 ios_simulator=no vulkan=yes lto=auto optimize=speed -j$(sysctl -n hw.ncpu)
+          # Web-এর জন্য এডিটর কম্পাইল করা হচ্ছে। মেমরি ম্যানেজমেন্টের জন্য optimize=size ব্যবহার করা হলো।
+          scons platform=web target=editor threads=yes production=yes lto=auto optimize=size -j$(sysctl -n hw.ncpu)
 
-      - name: Generate Native Xcode App Build
+      - name: Setup Directory Structure for iOS App
         run: |
-          cd godot-source/platform/ios/export
-          
-          # কম্পাইল করা নেটিভ .a লাইব্রেরিটি Xcode প্রজেক্টের জন্য প্রস্তুত করা
-          mkdir -p bin
-          cp ../../../bin/libgodot.ios.editor.arm64.a bin/
-          
-          # সুইফটের র‍্যাপার বাদ দিয়ে Godot-এর নিজস্ব Objective-C++ অ্যাপ ডেলিগেট ব্যবহার করে বিল্ড
-          xcodebuild archive -project Godot_v4.xcodeproj \
-            -scheme Godot \
-            -configuration Release \
-            -arch arm64 \
-            -archivePath GodotEditor.xcarchive \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+          mkdir -p build_stage/GodotEditor.app/godot_web
 
-      - name: Package Native IPA for Sideloading
+      - name: Process and Move Compiled Assets
         run: |
-          cd godot-source/platform/ios/export
-          
-          # IPA প্যাকেজিং স্ট্রাকচার তৈরি
+          cd godot-source/bin
+          # কম্পাইল হওয়া HTML ফাইলটিকে index.html হিসেবে রিনেম করা হচ্ছে যাতে র‍্যাপার সহজে চিনতে পারে
+          mv *.html ../../build_stage/GodotEditor.app/godot_web/index.html
+          mv * ../../build_stage/GodotEditor.app/godot_web/
+
+      - name: Generate Advanced Swift Wrapper (The Engine)
+        run: |
+          cat << 'EOF' > build_stage/App.swift
+          import SwiftUI
+          import WebKit
+
+          @main
+          struct GodotEditorApp: App {
+              var body: some Scene {
+                  WindowGroup { 
+                      EditorWebView().ignoresSafeArea() 
+                  }
+              }
+          }
+
+          class GodotSchemeHandler: NSObject, WKURLSchemeHandler {
+              func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+                  guard let url = urlSchemeTask.request.url else { return }
+                  var path = url.path
+                  if path == "" || path == "/" { path = "/index.html" }
+                  
+                  let bundlePath = Bundle.main.bundlePath + "/godot_web" + path
+                  
+                  if FileManager.default.fileExists(atPath: bundlePath) {
+                      let ext = (path as NSString).pathExtension.lowercased()
+                      var mimeType = "application/octet-stream"
+                      
+                      switch ext {
+                          case "wasm": mimeType = "application/wasm"
+                          case "js", "mjs": mimeType = "application/javascript"
+                          case "html": mimeType = "text/html"
+                          case "css": mimeType = "text/css"
+                          case "png": mimeType = "image/png"
+                          case "svg": mimeType = "image/svg+xml"
+                          case "pck": mimeType = "application/octet-stream"
+                          default: break
+                      }
+                      
+                      // Critical Headers for Multi-threading and SharedArrayBuffer in Godot 4
+                      let headers = [
+                          "Content-Type": mimeType,
+                          "Cross-Origin-Opener-Policy": "same-origin",
+                          "Cross-Origin-Embedder-Policy": "require-corp",
+                          "Access-Control-Allow-Origin": "*",
+                          "Cache-Control": "no-store"
+                      ]
+                      
+                      if let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers) {
+                          urlSchemeTask.didReceive(response)
+                          
+                          do {
+                              // .alwaysMapped is crucial here to prevent memory exhaustion on iOS
+                              let data = try Data(contentsOf: URL(fileURLWithPath: bundlePath), options: .alwaysMapped)
+                              urlSchemeTask.didReceive(data)
+                              urlSchemeTask.didFinish()
+                          } catch {
+                              urlSchemeTask.didFailWithError(error)
+                          }
+                      }
+                  } else {
+                      let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil)!
+                      urlSchemeTask.didReceive(response)
+                      urlSchemeTask.didFinish()
+                  }
+              }
+              
+              func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+          }
+
+          struct EditorWebView: UIViewRepresentable {
+              func makeUIView(context: Context) -> WKWebView {
+                  let config = WKWebViewConfiguration()
+                  config.setURLSchemeHandler(GodotSchemeHandler(), forURLScheme: "godot")
+                  
+                  let prefs = WKWebpagePreferences()
+                  prefs.allowsContentJavaScript = true
+                  config.defaultWebpagePreferences = prefs
+                  
+                  config.preferences.javaScriptCanOpenWindowsAutomatically = true
+                  config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+                  
+                  let webView = WKWebView(frame: .zero, configuration: config)
+                  
+                  // Disable scrolling and bouncing to simulate native app feel
+                  webView.scrollView.isScrollEnabled = false
+                  webView.scrollView.bounces = false
+                  webView.isOpaque = false
+                  webView.backgroundColor = .black
+                  
+                  if #available(iOS 16.4, *) {
+                      webView.isInspectable = true // Allows debugging via Safari on Mac
+                  }
+                  
+                  let request = URLRequest(url: URL(string: "godot://localhost/index.html")!)
+                  webView.load(request)
+                  
+                  return webView
+              }
+              
+              func updateUIView(_ uiView: WKWebView, context: Context) {}
+          }
+          EOF
+
+      - name: Generate Application Info.plist
+        run: |
+          cat << 'EOF' > build_stage/GodotEditor.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>GodotEditor</string>
+              <key>CFBundleIdentifier</key>
+              <string>org.godotengine.ios.editor</string>
+              <key>CFBundleName</key>
+              <string>Godot Editor</string>
+              <key>CFBundleShortVersionString</key>
+              <string>4.7</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>CFBundleSupportedPlatforms</key>
+              <array>
+                  <string>iPhoneOS</string>
+              </array>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>UIRequiresFullScreen</key>
+              <true/>
+              <key>UIFileSharingEnabled</key>
+              <true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key>
+              <true/>
+              <key>UILaunchStoryboardName</key>
+              <string>LaunchScreen</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Compile Swift Native Wrapper to Binary
+        run: |
+          xcrun --sdk iphoneos swiftc -target arm64-apple-ios15.0 -O -parse-as-library \
+            build_stage/App.swift -o build_stage/GodotEditor.app/GodotEditor
+            
+          chmod +x build_stage/GodotEditor.app/GodotEditor
+
+      - name: Package Final IPA for Deployment
+        run: |
           mkdir -p Payload
-          mv GodotEditor.xcarchive/Products/Applications/Godot.app Payload/
+          mv build_stage/GodotEditor.app Payload/
           
-          # থার্ড-পার্টি ইনস্টলেশনের জন্য বেসিক এনটাইটেলমেন্ট ফিক্স (যাতে ক্র্যাশ না করে)
-          ldid -S Payload/Godot.app/Godot || true
+          # Ad-hoc signing required for IPA structure before sideloading
+          codesign --force --deep --sign - Payload/GodotEditor.app
           
-          zip -r Godot4.7_Native_Editor.ipa Payload/
+          zip -r Godot_Master_Editor_iOS.ipa Payload/
 
-      - name: Upload Native Editor IPA
+      - name: Upload Finished Editor IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-4.7-native-ios-ipa
-          path: godot-source/platform/ios/export/Godot4.7_Native_Editor.ipa
+          name: godot-editor-ios-ipa
+          path: Godot_Master_Editor_iOS.ipa
