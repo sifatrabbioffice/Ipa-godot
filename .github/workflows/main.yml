@@ -1,10 +1,10 @@
-name: 🧪 Build Advanced Swift-Hybrid Godot 4.7 Native Editor
+name: 🧪 Build Xogot-Style Native Godot 4.7 Editor
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-hybrid-editor:
+  build-xogot-style-editor:
     runs-on: macos-15
     steps:
       - name: Checkout Godot Source Code
@@ -21,7 +21,6 @@ jobs:
       - name: Compile Godot C++ Core Brain (.a)
         run: |
           cd godot-source
-          # iOS এর জন্য পিওর C++ কোর ইঞ্জিন কম্পাইল করা হচ্ছে (No WebKit, Pure Native)
           scons platform=ios target=editor arch=arm64 production=yes lto=auto optimize=speed -j$(sysctl -n hw.ncpu)
 
       - name: Setup Build Directory Structure
@@ -31,26 +30,27 @@ jobs:
           LIB_NAME=$(ls libgodot.ios.editor*.a | head -n 1)
           cp $LIB_NAME ../../build_stage/libgodot_core.a
 
-      - name: Generate Objective-C++ Bridging Core
+      - name: Generate Objective-C++ Bridging Core (Fixed Threading)
         run: |
-          # সুইফটের সাথে C++ ইঞ্জিনের সংযোগ স্থাপন করার জন্য ব্রিজ তৈরি করা হচ্ছে
           cat << 'EOF' > build_stage/GodotBridge.h
           #import <UIKit/UIKit.h>
           @interface GodotBridge : NSObject
-          + (void)launchGodotEngine;
+          + (void)launchGodotEngineInView:(UIView *)hostView;
           @end
           EOF
 
           cat << 'EOF' > build_stage/GodotBridge.mm
           #import "GodotBridge.h"
-          
-          // Godot সোর্সের ভেতরের আসল iOS এন্ট্রি পয়েন্ট
+          #import <dispatch/dispatch.h>
+
           extern "C" int godot_ios_main(int argc, char *argv[]);
 
           @implementation GodotBridge
-          + (void)launchGodotEngine {
-              dispatch_async(dispatch_get_main_loop(), ^{
-                  // সরাসরি এডিটর মোড এবং ভিউপোর্ট লঞ্চ করার জন্য ইন্টারনাল ফ্ল্যাগ পুশ করা হলো
+          + (void)launchGodotEngineInView:(UIView *)hostView {
+              // Error fixed: dispatch_get_main_queue() correctly used
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  // In a deeply customized engine, we would pass the hostView pointer to Godot's iOS platform layer here.
+                  // For the standard binary, calling main initializes the Metal canvas on the active window.
                   char *custom_argv[] = { (char *)"godot", (char *)"--editor", NULL };
                   godot_ios_main(2, custom_argv);
               });
@@ -58,133 +58,176 @@ jobs:
           @end
           EOF
 
-      - name: Generate High-End Custom Swift Interface (Loader & Canvas)
+      - name: Generate Xogot-Style SwiftUI Interface
         run: |
           cat << 'EOF' > build_stage/App.swift
           import SwiftUI
 
           @main
           struct GodotApp: App {
-              @State private var currentStage: AppStage = .loader
-              @State private var engineProgress: CGFloat = 0.0
+              @State private var appState: AppState = .projectManager
               
               var body: some Scene {
                   WindowGroup {
                       ZStack {
-                          Color.black.ignoresSafeArea()
+                          Color(red: 0.1, green: 0.1, blue: 0.12).ignoresSafeArea() // Dark theme background
                           
-                          if currentStage == .loader {
-                              PremiumLoaderView(progress: $engineProgress, stage: $currentStage)
-                          } else {
-                              // গডো এডিটর স্ক্রিনটি সুইফটের টপ লেয়ারে পুশ হবে
-                              GodotViewportContainer()
-                                  .ignoresSafeArea()
+                          switch appState {
+                          case .projectManager:
+                              ProjectManagerView(appState: $appState)
+                          case .loading:
+                              EngineLoaderView(appState: $appState)
+                          case .editor:
+                              XogotStyleEditorView()
                           }
                       }
                   }
               }
           }
 
-          enum AppStage {
-              case loader
-              case nativeEditor
+          enum AppState {
+              case projectManager, loading, editor
           }
 
-          // ১. কাস্টম হাই-এন্ড সুইফট লোডার ইন্টারফেস
-          struct PremiumLoaderView: View {
-              @Binding var progress: CGFloat
-              @Binding var stage: AppStage
-              @State private var statusText = "Initializing Vulkan Pipelines..."
+          // ১. Welcome Page / Project Manager (Like image.png)
+          struct ProjectManagerView: View {
+              @Binding var appState: AppState
               
               var body: some View {
                   VStack(spacing: 30) {
-                      Spacer()
+                      Text("Godot Engine")
+                          .font(.system(size: 40, weight: .bold))
+                          .foregroundColor(.white)
+                          .padding(.top, 50)
                       
-                      // এডিটর লোগো অ্যানিমেশন (Xcode স্টাইল মিনিমালিজম)
-                      ZStack {
-                          Circle()
-                              .stroke(Color.gray.opacity(0.2), lineWidth: 4)
-                              .frame(width: 90, height: 90)
-                          
-                          Image(systemName: "square.stack.3d.up.fill")
-                              .font(.system(size: 35, weight: .semibold))
-                              .foregroundColor(.cyan)
-                      }
-                      
-                      VStack(spacing: 10) {
-                          Text("GODOT INTERNAL")
-                              .font(.system(size: 22, weight: .bold, design: .monospaced))
+                      Button(action: {
+                          withAnimation { appState = .loading }
+                      }) {
+                          Text("Create Game")
+                              .font(.headline)
                               .foregroundColor(.white)
-                              .tracking(4)
-                          
-                          Text("NATIVE IOS ENGINE 4.7")
-                              .font(.system(size: 11, weight: .medium))
-                              .foregroundColor(.gray)
-                              .tracking(2)
+                              .frame(width: 250, height: 55)
+                              .background(Color.blue.opacity(0.8))
+                              .cornerRadius(20)
                       }
+                      
+                      Text("Use Starter Project")
+                          .foregroundColor(.blue)
+                          .padding(.top, -10)
                       
                       Spacer()
                       
-                      // প্রিমিয়াম রানিং লোডার বার
-                      VStack(alignment: .leading, spacing: 8) {
-                          Text(statusText)
-                              .font(.system(size: 12, design: .monospaced))
-                              .foregroundColor(.cyan.opacity(0.8))
-                          
-                          GeometryReader { geo in
-                              ZStack(alignment: .leading) {
-                                  RoundedRectangle(cornerRadius: 3)
-                                      .fill(Color.gray.opacity(0.2))
-                                  
-                                  RoundedRectangle(cornerRadius: 3)
-                                      .fill(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
-                                      .frame(width: geo.size.width * progress)
-                              }
-                          }
-                          .frame(height: 5)
+                      // Mock bottom tab bar similar to Xogot
+                      HStack {
+                          TabBarIcon(icon: "clock", text: "Projects")
+                          TabBarIcon(icon: "graduationcap", text: "Learning Center")
+                          TabBarIcon(icon: "iphone", text: "On My iPhone", isActive: true)
                       }
-                      .frame(width: 260)
-                      .padding(.bottom, 50)
-                  }
-                  .onAppear {
-                      simulateEngineBoot()
+                      .padding()
+                      .background(Color.black)
+                      .cornerRadius(25)
+                      .padding(.bottom, 20)
                   }
               }
+          }
+
+          struct TabBarIcon: View {
+              var icon: String
+              var text: String
+              var isActive: Bool = false
               
-              func simulateEngineBoot() {
-                  // প্রথম ধাপ: মেমরি এবং পাইপলাইন চেক করা
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                      withAnimation { self.progress = 0.4 }
-                      self.statusText = "Allocating C++ Memory Pools..."
-                      
-                      // দ্বিতীয় ধাপ: কোর বাইনারি লিঙ্ক ভেরিফিকেশন
-                      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                          withAnimation { self.progress = 0.7 }
-                          self.statusText = "Mapping Virtual File System..."
-                          
-                          // চূড়ান্ত ধাপ: সুইফট থেকে সরাসরি গডো কোরে জাম্প করা
-                          DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                              withAnimation { self.progress = 1.0 }
-                              self.statusText = "Launching Core Editor Viewport..."
-                              
-                              DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                  // ব্রিজ কল করে গডোর আসল এডিটর ভিউপোর্ট চালু করা হচ্ছে
-                                  GodotBridge.launchGodotEngine()
-                                  self.stage = .nativeEditor
-                              }
-                          }
+              var body: some View {
+                  VStack {
+                      Image(systemName: icon)
+                          .font(.system(size: 20))
+                          .foregroundColor(isActive ? .blue : .gray)
+                      Text(text)
+                          .font(.system(size: 10))
+                          .foregroundColor(isActive ? .blue : .gray)
+                  }
+                  .frame(maxWidth: .infinity)
+              }
+          }
+
+          // ২. Loader View
+          struct EngineLoaderView: View {
+              @Binding var appState: AppState
+              
+              var body: some View {
+                  VStack {
+                      ProgressView("Compiling Shaders...")
+                          .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                          .foregroundColor(.white)
+                  }
+                  .onAppear {
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                          withAnimation { appState = .editor }
                       }
                   }
               }
           }
 
-          // ২. গডো নেটিভ ভিউপোর্ট হোল্ডার
-          struct GodotViewportContainer: UIViewControllerRepresentable {
-              func makeUIViewController(context: Context) -> UIViewController {
-                  let dummyController = UIViewController()
-                  dummyController.view.backgroundColor = .black
-                  return dummyController
+          // ৩. Editor View Page (Like image_2.png) - C++ Engine with Native UI Overlay
+          struct XogotStyleEditorView: View {
+              var body: some View {
+                  ZStack {
+                      // The C++ Brain Canvas (Base Layer)
+                      GodotNativeCanvas()
+                          .ignoresSafeArea()
+                      
+                      // SwiftUI Overlays (Top UI)
+                      VStack {
+                          HStack {
+                              Image(systemName: "sidebar.left")
+                              Spacer()
+                              Image(systemName: "play.fill")
+                          }
+                          .padding()
+                          .background(Color.black.opacity(0.8))
+                          .foregroundColor(.white)
+                          
+                          Spacer()
+                          
+                          // Bottom Tool Bar (Editor, Code, Play)
+                          HStack(spacing: 40) {
+                              BottomToolIcon(icon: "hammer.fill", title: "Editor", color: .blue)
+                              BottomToolIcon(icon: "doc.text.fill", title: "Code", color: .gray)
+                              BottomToolIcon(icon: "gamecontroller.fill", title: "Play", color: .gray)
+                          }
+                          .padding(15)
+                          .background(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.95))
+                          .cornerRadius(30)
+                          .padding(.bottom, 10)
+                      }
+                  }
               }
+          }
+
+          struct BottomToolIcon: View {
+              var icon: String
+              var title: String
+              var color: Color
+              
+              var body: some View {
+                  VStack(spacing: 5) {
+                      Image(systemName: icon).font(.system(size: 22)).foregroundColor(color)
+                      Text(title).font(.system(size: 10, weight: .bold)).foregroundColor(color)
+                  }
+              }
+          }
+
+          // ৪. The Godot Bridge Container
+          struct GodotNativeCanvas: UIViewControllerRepresentable {
+              func makeUIViewController(context: Context) -> UIViewController {
+                  let controller = UIViewController()
+                  controller.view.backgroundColor = .black
+                  
+                  // Trigger the C++ engine to attach to the view hierarchy
+                  GodotBridge.launchGodotEngineInView(controller.view)
+                  
+                  return controller
+              }
+              
               func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
           }
           EOF
@@ -199,35 +242,21 @@ jobs:
               <key>CFBundleExecutable</key>
               <string>GodotEditor</string>
               <key>CFBundleIdentifier</key>
-              <string>org.godotengine.ios.hybrid</string>
+              <string>org.godotengine.ios.xogotstyle</string>
               <key>CFBundleName</key>
-              <string>Godot Master</string>
-              <key>CFBundleShortVersionString</key>
-              <string>4.7</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>CFBundleSupportedPlatforms</key>
-              <array>
-                  <string>iPhoneOS</string>
-              </array>
+              <string>Godot X</string>
               <key>MinimumOSVersion</key>
               <string>15.0</string>
               <key>UIRequiresFullScreen</key>
-              <true/>
-              <key>UIFileSharingEnabled</key>
-              <true/>
-              <key>LSSupportsOpeningDocumentsInPlace</key>
               <true/>
           </dict>
           </plist>
           EOF
 
-      - name: Compile and Link Pure Swift and C++ Layers
+      - name: Compile and Link Complete Architecture
         run: |
-          # ১. ওবজেক্টিভ-সি++ ব্রিজ ফাইলটি কম্পাইল করা হচ্ছে
           xcrun --sdk iphoneos clang++ -target arm64-apple-ios15.0 -c build_stage/GodotBridge.mm -o build_stage/GodotBridge.o -Igodot-source/platform/ios
 
-          # ২. সুইফট ইন্টারফেস কম্পাইল করে এবং সি++ লাইব্রেরির সাথে অবজেক্ট লিঙ্ক করে ফাইনাল বাইনারি তৈরি
           xcrun --sdk iphoneos swiftc -target arm64-apple-ios15.0 -O -parse-as-library \
             build_stage/App.swift build_stage/GodotBridge.o \
             -import-objc-header build_stage/GodotBridge.h \
@@ -238,18 +267,16 @@ jobs:
             -framework Security -framework OpenGLES -framework CoreMotion -lobjc \
             -o build_stage/GodotEditor.app/GodotEditor
 
-      - name: Package Master Native IPA
+      - name: Package Final Xogot-Style IPA
         run: |
           chmod +x build_stage/GodotEditor.app/GodotEditor
           mkdir -p Payload
           mv build_stage/GodotEditor.app Payload/
-          
-          # ট্রলস্টোর/সাইডলোড এনভায়রনমেন্টের জন্য সিগনেচার করা হচ্ছে
           codesign --force --deep --sign - Payload/GodotEditor.app
-          zip -r Godot_Swift_Hybrid_Native.ipa Payload/
+          zip -r Godot_Xogot_Style_iOS.ipa Payload/
 
-      - name: Upload Finished Master IPA
+      - name: Upload Final IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-swift-hybrid-native-ipa
-          path: Godot_Swift_Hybrid_Native.ipa
+          name: godot-xogot-style-ipa
+          path: Godot_Xogot_Style_iOS.ipa
