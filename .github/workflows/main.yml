@@ -30,7 +30,7 @@ jobs:
           LIB_NAME=$(ls libgodot.ios.editor*.a | head -n 1)
           cp $LIB_NAME ../../build_stage/libgodot_core.a
 
-      - name: Generate Objective-C++ Bridging Core (Fixed Threading)
+      - name: Generate Objective-C++ Bridging Core
         run: |
           cat << 'EOF' > build_stage/GodotBridge.h
           #import <UIKit/UIKit.h>
@@ -47,10 +47,7 @@ jobs:
 
           @implementation GodotBridge
           + (void)launchGodotEngineInView:(UIView *)hostView {
-              // Error fixed: dispatch_get_main_queue() correctly used
               dispatch_async(dispatch_get_main_queue(), ^{
-                  // In a deeply customized engine, we would pass the hostView pointer to Godot's iOS platform layer here.
-                  // For the standard binary, calling main initializes the Metal canvas on the active window.
                   char *custom_argv[] = { (char *)"godot", (char *)"--editor", NULL };
                   godot_ios_main(2, custom_argv);
               });
@@ -70,7 +67,7 @@ jobs:
               var body: some Scene {
                   WindowGroup {
                       ZStack {
-                          Color(red: 0.1, green: 0.1, blue: 0.12).ignoresSafeArea() // Dark theme background
+                          Color(red: 0.1, green: 0.1, blue: 0.12).ignoresSafeArea()
                           
                           switch appState {
                           case .projectManager:
@@ -89,7 +86,6 @@ jobs:
               case projectManager, loading, editor
           }
 
-          // ১. Welcome Page / Project Manager (Like image.png)
           struct ProjectManagerView: View {
               @Binding var appState: AppState
               
@@ -117,7 +113,6 @@ jobs:
                       
                       Spacer()
                       
-                      // Mock bottom tab bar similar to Xogot
                       HStack {
                           TabBarIcon(icon: "clock", text: "Projects")
                           TabBarIcon(icon: "graduationcap", text: "Learning Center")
@@ -149,7 +144,6 @@ jobs:
               }
           }
 
-          // ২. Loader View
           struct EngineLoaderView: View {
               @Binding var appState: AppState
               
@@ -167,15 +161,12 @@ jobs:
               }
           }
 
-          // ৩. Editor View Page (Like image_2.png) - C++ Engine with Native UI Overlay
           struct XogotStyleEditorView: View {
               var body: some View {
                   ZStack {
-                      // The C++ Brain Canvas (Base Layer)
                       GodotNativeCanvas()
                           .ignoresSafeArea()
                       
-                      // SwiftUI Overlays (Top UI)
                       VStack {
                           HStack {
                               Image(systemName: "sidebar.left")
@@ -188,7 +179,6 @@ jobs:
                           
                           Spacer()
                           
-                          // Bottom Tool Bar (Editor, Code, Play)
                           HStack(spacing: 40) {
                               BottomToolIcon(icon: "hammer.fill", title: "Editor", color: .blue)
                               BottomToolIcon(icon: "doc.text.fill", title: "Code", color: .gray)
@@ -216,14 +206,13 @@ jobs:
               }
           }
 
-          // ৪. The Godot Bridge Container
           struct GodotNativeCanvas: UIViewControllerRepresentable {
               func makeUIViewController(context: Context) -> UIViewController {
                   let controller = UIViewController()
                   controller.view.backgroundColor = .black
                   
-                  // Trigger the C++ engine to attach to the view hierarchy
-                  GodotBridge.launchGodotEngineInView(controller.view)
+                  // FIXED ERROR HERE: properly calling the translated Swift method signature
+                  GodotBridge.launchGodotEngine(in: controller.view)
                   
                   return controller
               }
